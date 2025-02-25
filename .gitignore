@@ -6,6 +6,7 @@
 .RData
 .RDataTmp
 
+
 # User-specific files
 .Ruserdata
 
@@ -49,3 +50,7 @@ po/*~
 rsconnect/
 
 *.mp4
+
+*.Rhistory
+*.Rprofile
+*.RData
