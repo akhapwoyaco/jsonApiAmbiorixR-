@@ -7,6 +7,7 @@ library(jsonlite)
 library(ambiorix)
 
 # Configuration
+# define the port, db,log, rate,limits and authentications
 config <- list(
   port = 3000,
   db_path = "flights.db",
@@ -77,10 +78,6 @@ setup_database <- function(processed_data) {
     stop(e)
   })
   
-  # Create indexes for better query performance
-  # dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_ID ON flights(ID)")
-  # dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_carrier ON flights(carrier)")
-  
   logger::log_info("Setting database completed ... ")
   
 }
@@ -101,7 +98,7 @@ get_db_connection <- function() {
   
 }
 
-# Error Handling
+# Error Handling: orints out errors and log of errors
 handle_error <- function(err) {
   logger::log_error(sprintf("Error: %s", err$message))
   
@@ -113,25 +110,6 @@ handle_error <- function(err) {
   )
 }
 
-
-# parse request body
-parse_request_body <- function(req) {
-  if (is.null(req$body) || req$body == "") {
-    return(NULL)
-  }
-  
-  tryCatch({
-    if (is.character(req$body)) {
-      return(jsonlite::fromJSON(req$body, simplifyVector = TRUE))
-    } else {
-      return(req$body)  # Might already be parsed
-    }
-  }, error = function(e) {
-    logger::log_error(paste("JSON parse error:", e$message))
-    return(NULL)
-  })
-}
-#
 # Part 2: API Implementation
 create_app <- function() {
   app <- Ambiorix$new()
@@ -147,98 +125,87 @@ create_app <- function() {
     res$json(list(status = "ok", message = "API is running"))
   })  
   
-  #'   # 1. POST /flight - Create new flight
-  #'   app$post(
-  #'     "/flight",
-  #'     # validate_request(list(body = c("year", "month", "day", "dep_time", "carrier", "flight", "origin", "dest"))),
-  #'     function(req, res) {
-  #'       tryCatch({
-  #'         logger::log_info("POST /flight route handler called") # Add this
-  #'         # logger::log_info(paste("Request body:", req$body))
-  #'         # 
-  #'         # # Debug log the request body
-  #'         # logger::log_debug(paste("Request body:", req$body))
-  #'         # 
-  #'         # Safely parse JSON with error handling
-  #'         if (is.null(req$body)){#} || req$body == "") {
-  #'           res$status <- 400
-  #'           res$json(list(error = "Empty request body"))
-  #'           return(TRUE)
-  #'         }
-  #'         
-  #'         # Use the helper function instead of inline parsing
-  #'         flight_data <- parse_request_body(req)
-  #'         
-  #'         if (is.null(flight_data)) {
-  #'           res$status <- 400
-  #'           res$json(list(error = "Invalid or empty request body"))
-  #'           return(TRUE)
-  #'         }
-  #'         
-  #'         # parse json
-  #'         # flight_data <- tryCatch({
-  #'         #   fromJSON(req$body, simplifyVector = TRUE)
-  #'         # }, error = function(e) {
-  #'         #   logger::log_error(paste("JSON parse error:", e$message))
-  #'         #   res$status <- 400
-  #'         #   res$json(list(error = "Invalid JSON in request body"))
-  #'         #   return(NULL)
-  #'         # })
-  #'         
-  #'         # if (is.null(flight_data)) return()
-  #'         
-  #'         logger::log_debug(paste("Parsed flight_data:", str(flight_data)))
-  #'         
-  #'         con <- get_db_connection()
-  #'         on.exit(dbDisconnect(con), add = TRUE)
-  #'         
-  #'         
-  #'         
-  #'         # Get the last flight id and increment it
-  #'         last_flight_id_result <- dbGetQuery(con, "SELECT MAX(ID) FROM flights")
-  #'         last_flight_id <- last_flight_id_result[[1, 1]] # Extract the value
-  #'         
-  #'         if (is.null(last_flight_id)) {
-  #'           flight_data$ID <- 1 # If no previous records, start with 1
-  #'         } else {
-  #'           flight_data$ID <- last_flight_id + 1
-  #'         }
-  #'         
-  #'         # flight_data <- fromJSON(req$body)
-  #'         # flight_data$ID <- uuid::UUIDgenerate()
-  #'         
-  #'         # Convert to data frame first
-  #'         flight_df <- as.data.frame(flight_data, stringsAsFactors = FALSE)
-  #'         # Log the structure before writing
-  #'         logger::log_debug(paste("Flight data structure:", 
-  #'                                 paste(names(flight_df), collapse=", ")))
-  #'         # Log the structure we're trying to write
-  #'         logger::log_debug(paste("Writing flight data with columns:", 
-  #'                                 paste(names(flight_df), collapse=", ")))
-  #'         
-  #'         # Get existing table structure to ensure compatibility
-  #'         table_info <- dbGetQuery(con, "PRAGMA table_info(flights)")
-  #'         if (nrow(table_info) > 0) {
-  #'           logger::log_debug(paste("Existing table columns:", 
-  #'                                   paste(table_info$name, collapse=", ")))
-  #'         }
-  #'         # 
-  #'         dbWriteTable(con, "flights", flight_df, append = TRUE)
-  #'         
-  #'         logger::log_info(sprintf("Created flight: %s", flight_data$ID))
-  #'         
-  #'         res$json(list(
-  #'           success = TRUE,
-  #'           ID = flight_data$ID,
-  #'           message = "Flight created successfully"
-  #'         ))
-  #'       }, error = function(err) {
-  #'         logger::log_error(paste("Error creating flight:", err$message))
-  #'         logger::log_error(paste("Error call:", deparse(err$call)))
-  #'         res$status <- 500
-  #'         res$json(handle_error(err))
-  #'       })
-  #'     })
+  # 1. POST /flight - Create new flight
+  app$post(
+    "/flight",
+    function(req, res) {
+      tryCatch({
+        logger::log_info("POST /flight route handler called") # Add this
+        
+        # Safely parse JSON with error handling
+        if (is.null(req$body)){
+          res$status <- 400
+          res$json(list(error = "Empty request body"))
+          return(TRUE)
+        }
+        
+        # Use the helper function instead of inline parsing
+        # Parse JSON safely
+        flight_data <- tryCatch({
+          #
+          data <- req$body[["rook.input"]]
+          data <- data$read_lines()
+          jsonlite::fromJSON(data) |> as.data.frame()
+          #
+        }, error = function(e) {
+          logger::log_error(paste("JSON parse error:", e$message))
+          res$status <- 400
+          res$json(list(error = paste("Invalid JSON in request body:", e$message)))
+          return(NULL)
+        })
+        
+        if (is.null(flight_data)) {
+          res$status <- 400
+          res$json(list(error = "Invalid or empty request body"))
+          return(TRUE)
+        }
+        logger::log_debug(paste("Parsed flight_data:", str(flight_data)))
+        
+        con <- get_db_connection()
+        on.exit(dbDisconnect(con), add = TRUE)
+        
+        # Get the last flight id and increment it
+        last_flight_id_result <- dbGetQuery(con, "SELECT MAX(ID) FROM flights")
+        last_flight_id <- last_flight_id_result[[1, 1]] # Extract the value
+        
+        if (is.null(last_flight_id)) {
+          flight_data$ID <- 1 # If no previous records, start with 1
+        } else {
+          flight_data$ID <- last_flight_id + 1
+        }
+
+        # Convert to data frame first
+        flight_df <- as.data.frame(flight_data, stringsAsFactors = FALSE)
+        # Log the structure before writing
+        logger::log_debug(paste("Flight data structure:",
+                                paste(names(flight_df), collapse=", ")))
+        # Log the structure we're trying to write
+        logger::log_debug(paste("Writing flight data with columns:",
+                                paste(names(flight_df), collapse=", ")))
+        
+        # Get existing table structure to ensure compatibility
+        table_info <- dbGetQuery(con, "PRAGMA table_info(flights)")
+        if (nrow(table_info) > 0) {
+          logger::log_debug(paste("Existing table columns:",
+                                  paste(table_info$name, collapse=", ")))
+        }
+        #
+        dbWriteTable(con, "flights", flight_df, append = TRUE)
+        
+        logger::log_info(sprintf("Created flight: %s", flight_data$ID))
+        
+        res$json(list(
+          success = TRUE,
+          ID = flight_data$ID,
+          message = "Flight created successfully"
+        ))
+      }, error = function(err) {
+        logger::log_error(paste("Error creating flight:", err$message))
+        logger::log_error(paste("Error call:", deparse(err$call)))
+        res$status <- 500
+        res$json(handle_error(err))
+      })
+    })
   
   # 2. GET /flight/:id - Get flight details
   app$get("/flight/:id", function(req, res) {
@@ -261,7 +228,7 @@ create_app <- function() {
       flight <- dbGetQuery(
         con,
         "SELECT * FROM flights WHERE ID = ?",
-        params = unlist(req$params$id) ###
+        params = unlist(req$params$id)
       )
       
       logger::log_debug(paste("Query result:", nrow(flight), "rows"))
@@ -380,31 +347,22 @@ create_app <- function() {
       
       logger::log_info("PUT STARTS")
       
-      data <- req$body[["rook.input"]]
-      data <- data$read_lines()
-      mmmm = jsonlite::fromJSON(data)
-      
-      # print(mmmm)
-
-      logger::log_info(mmmm)
-      
       # Parse JSON safely
       flight_data <- tryCatch({
         #
         data <- req$body[["rook.input"]]
         data <- data$read_lines()
-        jsonlite::fromJSON(data)
+        jsonlite::fromJSON(data) |> as.data.frame()
         #
-        # lapply(my_list, function(x) as.data.frame(fromJSON(x))) |>
-        #   dplyr::bind_rows()
-        # jsonlite::fromJSON(req$body, simplifyVector = TRUE)
       }, error = function(e) {
         logger::log_error(paste("JSON parse error:", e$message))
         res$status <- 400
         res$json(list(error = paste("Invalid JSON in request body:", e$message)))
         return(NULL)
       })
-
+      
+      logger::log_info("Nrows", nrow(flight_data))
+      
       if (is.null(flight_data)) return(TRUE)
       
       con <- get_db_connection()
@@ -434,21 +392,34 @@ create_app <- function() {
         res$json(list(error = "No fields provided for update"))
         return(TRUE)
       }
-      
-      set_clause <- paste(update_fields, "= ?", collapse = ", ")
       #
-      query <- sprintf(
-        "UPDATE flights SET %s WHERE ID = ?",
-        set_clause
+      set_clauses <- vector("character", length(update_fields))
+      params <- vector("list", length(update_fields) + 1)
+      
+      for (i in seq_along(update_fields)) {
+        field <- update_fields[i]
+        set_clauses[i] <- paste0(field, " = ?")
+        params[[i]] <- flight_data[[field]]
+      }
+      
+      # Add ID as the last parameter
+      params[[length(params)]] <- req$params$id
+      
+      # Build SQL with placeholders
+      sql <- paste0(
+        "UPDATE flights SET ",
+        paste(set_clauses, collapse = ", "),
+        " WHERE ID = ?"
       )
-      logger::log_info(paste("Query: ", query))
-      print(query)
+      
+      # Execute update
+      logger::log_debug(paste("Executing SQL:", sql))
+      logger::log_debug(paste("With params:", paste(unlist(params), collapse=", ")))
+      
+      result <- dbExecute(con, sql, params = params)
       #
-      params <- c(as.list(flight_data), list(req$params$id))
-      logger::log_info(paste("Params: ", paste(params, collapse = ", ")))
-      
-      dbExecute(con, query, params = params)
-      
+      logger::log_debug(paste("Executing SQL Outcome:", result))
+      #
       res$send(list(
         success = TRUE,
         message = "Flight updated successfully"
@@ -459,137 +430,6 @@ create_app <- function() {
       res$json(handle_error(err))
     })
   })
-  
-  #'   # 6. PUT /flights/:id - Update flight details
-  #'   app$put("/flights/:id", function(req, res) {
-  #'     tryCatch({
-  #'       
-  #'       logger::log_info("FLIGHT PUT")
-  #'       #
-  #'       #
-  #'       # logger::log_info(paste(req$body))
-  #' #'       
-  #' #'       # # body existand is parse able
-  #' #'       # if (is.null(req$body)){
-  #' #'       #   res$status = 400
-  #' #'       #   res$json(list(error = "Empty request body"))
-  #' #'       #   return()
-  #' #'       # }
-  #' #'       # 
-  #' #'       # # ensure body is character string
-  #' #'       # body_text = if (is.character(req$body)){
-  #' #'       #   req$body
-  #' #'       # } else {
-  #' #'       #   tryCatch({
-  #' #'       #     as.character(req$body)
-  #' #'       #   }, error = function(e){
-  #' #'       #     NULL
-  #' #'       #   })
-  #' #'       # }
-  #' #'       # 
-  #' #'       # if (is.null(body_text) || nchar(body_text) == 0){
-  #' #'       #   res$status = 400
-  #' #'       #   res$json(list(error = "Invalid request body"))
-  #' #'       #   return(TRUE)
-  #' #'       # }
-  #' #'       
-  #' #'       # Parse JSON safely
-  #' #'       flight_data <- tryCatch({
-  #' #'         jsonlite::fromJSON(req$body, simplifyVector = TRUE)
-  #' #'       }, error = function(e) {
-  #' #'         logger::log_error(paste("JSON parse error:", e$message))
-  #' #'         res$status <- 400
-  #' #'         res$json(list(error = paste("Invalid JSON in request body:", e$message)))
-  #' #'         return(NULL)
-  #' #'       })
-  #' #' 
-  #' #'       if (is.null(flight_data)) return()
-  #' #'       
-  #' #'       # Use the helper function instead of inline parsing
-  #' #'       flight_data <- parse_request_body(req)
-  #' #' 
-  #' #'       if (is.null(flight_data)) {
-  #' #'         res$status <- 400
-  #' #'         res$json(list(error = "Invalid or empty request body"))
-  #' #'         return(TRUE)
-  #' #'       }
-  #' #' 
-  #' #'       con <- get_db_connection()
-  #' #'       on.exit(dbDisconnect(con), add = TRUE)
-  #' #'       #
-  #' #'       # Check if flight exists
-  #' #'       exists <- dbGetQuery(
-  #' #'         con,
-  #' #'         "SELECT 1 FROM flights WHERE ID = ?",
-  #' #'         params = list(req$params$id)
-  #' #'       )
-  #' #'       
-  #' #'       print(exists)
-  #' #' 
-  #' #'       if (nrow(exists) == 0) {
-  #' #'         res$status <- 404
-  #' #'         res$json(list(error = "Flight not found"))
-  #' #'         return(TRUE)
-  #' #'       }
-  #' #'       #
-  #' #'       # # Build update query dynamically based on provided fields
-  #' #'       update_fields <- names(flight_data)
-  #' #' #'       #
-  #' #' #'       # check if fields are procided
-  #' #' #'       if (length(update_fields) == 0){
-  #' #' #'         res$status <- 400
-  #' #' #'         res$json(list(error = "No fields provided for update"))
-  #' #' #'         return(TRUE)
-  #' #' #'       }
-  #' #' #'       
-  #' #'       # set_clause <- paste(update_fields, "= ?", collapse = ", ")
-  #' #'       # #
-  #' #'       # query <- sprintf(
-  #' #'       #   "UPDATE flights SET %s WHERE ID = ?",
-  #' #'       #   set_clause
-  #' #'       # )
-  #' #'       # # print(query)
-  #' #'       # #
-  #' #'       # params <- c(as.list(flight_data), list(req$params$id))
-  #' #' 
-  #' #'       set_clauses <- vector("character", length(update_fields))
-  #' #'       params <- vector("list", length(update_fields) + 1)
-  #' #' 
-  #' #'       for (i in seq_along(update_fields)) {
-  #' #'         field <- update_fields[i]
-  #' #'         set_clauses[i] <- paste0(field, " = ?")
-  #' #'         params[[i]] <- flight_data[[field]]
-  #' #'       }
-  #' #' 
-  #' #'       # Add ID as the last parameter
-  #' #'       params[[length(params)]] <- req$params$id
-  #' #' 
-  #' #'       # Build SQL with placeholders
-  #' #'       sql <- paste0(
-  #' #'         "UPDATE flights SET ",
-  #' #'         paste(set_clauses, collapse = ", "),
-  #' #'         " WHERE ID = ?"
-  #' #'       )
-  #' #' 
-  #' #'       # Execute update
-  #' #'       logger::log_debug(paste("Executing SQL:", sql))
-  #' #'       logger::log_debug(paste("With params:", paste(unlist(params), collapse=", ")))
-  #' #' 
-  #' #'       result <- dbExecute(con, sql, params = params)
-  #'       
-  #'       res$json(list(
-  #'         success = TRUE,
-  #'         message = "Flight updated successfully"
-  #'       ))
-  #'       
-  #   }, error = function(err) {
-  #     logger::log_error(paste("Error: ", err$message))
-  #     res$status <- 500
-  #     res$json(handle_error(err))
-  #   })
-  # })
-  #
-  
   # 7. DELETE /:id - Delete flight
   app$delete("/:id", function(req, res) {
     tryCatch({

@@ -48,7 +48,36 @@ echo -e "\n${GREEN}Test 41: Get average departure delay by airline${NC}"
 curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_URL}/avg-dep-delay/AA" | jq '.'
 
 
- curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_URL}/flight/13" | jq '.'
+# Test 6: Create new flight (POST)
+echo -e "\n${GREEN}Test 6: Create new flight (POST)${NC}"
+curl -v -s -X POST "${API_URL}/flight" -H "Authorization: Bearer ${AUTH_TOKEN}" \
+-H "Content-Type: application/json" \
+-d '{
+    "year": 2023, 
+    "month": 5, 
+    "day": 15,
+    "dep_time": 830, 
+    "sched_dep_time": 516, 
+    "dep_delay":200,  
+    "arr_time":819 , 
+    "sched_arr_time":11 ,
+    "arr_delay":1,
+    "carrier": "AA",
+    "flight": 1234, 
+    "tailnum": "AC3456", 
+    "origin": "JFK", 
+    "dest": "LAX",
+    "air_time": 334, 
+    "distance": 1290  ,
+    "hour":4, 
+    "minute":25
+  }'
+
+echo -e "\n"
+
+
+echo -e "\n${GREEN}Verify flight data before put"
+curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_URL}/flight/13" | jq '.'
  
 # Test 7: Update flight details (PUT)
 echo -e "\n${GREEN}Test 7: Update flight details (PUT)${NC}"
@@ -58,7 +87,6 @@ curl -v -X PUT "${API_URL}/flights/13" -H "Authorization: Bearer ${AUTH_TOKEN}" 
     "year": "2010",
     "carrier": "AA"
   }' 
-
 
 echo -e "\n${GREEN}Verify flight data"
 curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" "${API_URL}/flight/13" | jq '.'

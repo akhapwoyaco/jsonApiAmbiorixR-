@@ -1,0 +1,71 @@
+INFO [2025-02-25 17:51:37] Application initialization started.
+INFO [2025-02-25 17:51:37] Logging setup completed.
+INFO [2025-02-25 17:51:37] Initializing application
+INFO [2025-02-25 17:51:37] Starting data processing ... 
+DEBUG [2025-02-25 17:51:37] Flights data loaded with 336776 rows.
+INFO [2025-02-25 17:51:37] Ending data processing ... 
+INFO [2025-02-25 17:51:37] Data processing completed.
+INFO [2025-02-25 17:51:37] Setting database ... 
+INFO [2025-02-25 17:51:37] Removed existing database file
+INFO [2025-02-25 17:51:37] Writing flights data to database
+INFO [2025-02-25 17:51:38] Successfully wrote flights data
+INFO [2025-02-25 17:51:38] Setting database completed ... 
+INFO [2025-02-25 17:51:38] Database setup completed.
+INFO [2025-02-25 17:51:38] Starting server on port 3000
+DEBUG [2025-02-25 17:51:38] Port: 3000
+DEBUG [2025-02-25 17:51:38] Port Type: double
+DEBUG [2025-02-25 17:51:38] Host: 127.0.0.1
+DEBUG [2025-02-25 17:51:38] Host Type: character
+DEBUG [2025-02-25 17:51:38] Received request:  
+DEBUG [2025-02-25 17:51:45] Received request:  
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] GET /flight/:id called with id: 1
+DEBUG [2025-02-25 17:51:46] GET /flight/:id called with id: 1
+DEBUG [2025-02-25 17:51:46] Request parameters: id 1
+DEBUG [2025-02-25 17:51:46] Database connection established: TRUE
+DEBUG [2025-02-25 17:51:46] Executing SQL query: SELECT * FROM flights WHERE ID = ? with params: 1
+DEBUG [2025-02-25 17:51:46] Query result: 1 rows
+INFO [2025-02-25 17:51:46] GET /flight/:id completed successfully
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] GET /flight/:id called with id: 1
+DEBUG [2025-02-25 17:51:46] GET /flight/:id called with id: 1
+DEBUG [2025-02-25 17:51:46] Request parameters: id 1
+DEBUG [2025-02-25 17:51:46] Database connection established: TRUE
+DEBUG [2025-02-25 17:51:46] Executing SQL query: SELECT * FROM flights WHERE ID = ? with params: 1
+DEBUG [2025-02-25 17:51:46] Query result: 1 rows
+INFO [2025-02-25 17:51:46] GET /flight/:id completed successfully
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] Received request:  
+DEBUG [2025-02-25 17:51:46] Received request:  
+INFO [2025-02-25 17:51:46] POST /flight route handler called
+DEBUG [2025-02-25 17:51:46] Parsed flight_data: 
+DEBUG [2025-02-25 17:51:46] Flight data structure: year, month, day, dep_time, sched_dep_time, dep_delay, arr_time, sched_arr_time, arr_delay, carrier, flight, tailnum, origin, dest, air_time, distance, hour, minute, ID
+DEBUG [2025-02-25 17:51:46] Writing flight data with columns: year, month, day, dep_time, sched_dep_time, dep_delay, arr_time, sched_arr_time, arr_delay, carrier, flight, tailnum, origin, dest, air_time, distance, hour, minute, ID
+DEBUG [2025-02-25 17:51:46] Existing table columns: year, month, day, dep_time, sched_dep_time, dep_delay, arr_time, sched_arr_time, arr_delay, carrier, flight, tailnum, origin, dest, air_time, distance, hour, minute, time_hour, ID, is_delayed
+INFO [2025-02-25 17:51:47] Created flight: 336777
+DEBUG [2025-02-25 17:51:47] Received request:  
+DEBUG [2025-02-25 17:51:47] GET /flight/:id called with id: 13
+DEBUG [2025-02-25 17:51:47] GET /flight/:id called with id: 13
+DEBUG [2025-02-25 17:51:47] Request parameters: id 13
+DEBUG [2025-02-25 17:51:47] Database connection established: TRUE
+DEBUG [2025-02-25 17:51:47] Executing SQL query: SELECT * FROM flights WHERE ID = ? with params: 13
+DEBUG [2025-02-25 17:51:47] Query result: 1 rows
+INFO [2025-02-25 17:51:47] GET /flight/:id completed successfully
+DEBUG [2025-02-25 17:51:47] Received request:  
+INFO [2025-02-25 17:51:47] PUT STARTS
+INFO [2025-02-25 17:51:47] Nrows1
+INFO [2025-02-25 17:51:47] PUT EXISTS
+DEBUG [2025-02-25 17:51:47] Executing SQL: UPDATE flights SET year = ?, carrier = ? WHERE ID = ?
+DEBUG [2025-02-25 17:51:47] With params: 2010, AA, 13
+DEBUG [2025-02-25 17:51:47] Executing SQL Outcome: 1
+DEBUG [2025-02-25 17:51:47] Received request:  
+DEBUG [2025-02-25 17:51:47] GET /flight/:id called with id: 13
+DEBUG [2025-02-25 17:51:47] GET /flight/:id called with id: 13
+DEBUG [2025-02-25 17:51:47] Request parameters: id 13
+DEBUG [2025-02-25 17:51:47] Database connection established: TRUE
+DEBUG [2025-02-25 17:51:47] Executing SQL query: SELECT * FROM flights WHERE ID = ? with params: 13
+DEBUG [2025-02-25 17:51:47] Query result: 1 rows
+INFO [2025-02-25 17:51:47] GET /flight/:id completed successfully
+DEBUG [2025-02-25 17:51:47] Received request:  
