@@ -1,0 +1,189 @@
+#!/bin/bash
+# Comprehensive curl tests for the Flight API
+
+# Configuration
+API_URL="http://localhost:3000"
+AUTH_TOKEN="dev-token-123"
+AUTH_HEADER="Authorization: Bearer $AUTH_TOKEN"
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Test counter
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+# Helper function to run tests
+run_test() {
+  TEST_NAME=$1
+  COMMAND=$2
+  EXPECTED_STATUS=$3
+  
+  echo -e "\n---------------------------------------------------"
+  echo "Testing: $TEST_NAME"
+  echo "Command: $COMMAND"
+  echo -e "---------------------------------------------------"
+  
+  # Run the command and capture output and headers separately
+  RESPONSE=$(eval $COMMAND)
+  EXIT_CODE=$?
+    
+    # Check if curl command succeeded
+    if [ $EXIT_CODE -ne 0 ]; then
+  echo -e "${RED}FAILED: Curl command failed with exit code $EXIT_CODE${NC}"
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  return
+  fi
+  
+  # Print response for debugging
+  echo "Raw response: $RESPONSE"
+  
+  # Extract status code if using -i flag
+  if [[ "$COMMAND" == *"-i"* ]]; then
+  STATUS_CODE=$(echo "$RESPONSE" | grep -o "HTTP/[0-9.]* [0-9]*" | awk '{print $2}')
+  
+  # If we got a status code and it matches expected, consider it passed
+  if [ ! -z "$STATUS_CODE" ] && [ "$STATUS_CODE" = "$EXPECTED_STATUS" ]; then
+  echo -e "${GREEN}PASSED: Status code $STATUS_CODE matches expected $EXPECTED_STATUS${NC}"
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  elif [ ! -z "$STATUS_CODE" ]; then
+  echo -e "${RED}FAILED: Status code $STATUS_CODE doesn't match expected $EXPECTED_STATUS${NC}"
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  else
+    echo -e "${RED}FAILED: Couldn't extract status code from response${NC}"
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  else
+    # If not using -i flag, just check if the response looks valid
+    if [[ "$RESPONSE" == *"success"* || "$RESPONSE" == *"flight_id"* || "$RESPONSE" == *"carrier"* ]]; then
+  echo -e "${GREEN}PASSED: Response contains expected data${NC}"
+  TESTS_PASSED=$((TESTS_PASSED + 1))
+  else
+    echo -e "${RED}FAILED: Response doesn't contain expected data${NC}"
+  TESTS_FAILED=$((TESTS_FAILED + 1))
+  fi
+  fi
+}
+
+echo "==============================================="
+echo "CHECKING SERVER STATUS BEFORE RUNNING TESTS"
+echo "==============================================="
+# Check if the server is running
+SERVER_STATUS=$(curl -s -o /dev/null -w "%{http_code}" $API_URL)
+if [ "$SERVER_STATUS" = "000" ]; then
+echo -e "${RED}ERROR: Cannot connect to server at $API_URL${NC}"
+echo "Please make sure the R server is running on port 3000"
+echo "You may need to start it with: Rscript -e 'source(\"your_api_file.R\"); init_app()'"
+exit 1
+else
+  echo -e "${GREEN}Server appears to be running at $API_URL${NC}"
+fi
+
+# Store a flight ID for testing
+FLIGHT_ID=""
+
+# Test 1: Authentication failure test
+# Using full -i flag and proper quoting
+run_test "Authentication Failure" "curl -s -i -X GET \"$API_URL/avg-dep-delay\"" "401"
+
+# Test 2: Create a new flight
+echo -e "\n--- Creating a new flight for testing ---"
+CREATE_RESPONSE=$(curl -s -H "$AUTH_HEADER" -X POST "$API_URL/flight" \
+                  -H "Content-Type: application/json" \
+                  -d '{
+    "carrier": "UA",
+    "origin": "JFK",
+    "dest": "LAX",
+    "dep_time": 800,
+    "arr_time": 1100
+  }')
+
+echo "Create response: $CREATE_RESPONSE"
+
+# Extract flight_id from the response - more robust JSON parsing
+FLIGHT_ID=$(echo "$CREATE_RESPONSE" | grep -o '"flight_id":"[^"]*"' | sed 's/"flight_id":"//;s/"//')
+
+if [ -z "$FLIGHT_ID" ]; then
+# Try alternate extraction method
+FLIGHT_ID=$(echo "$CREATE_RESPONSE" | grep -o '"flight_id": *"[^"]*"' | sed 's/"flight_id": *"//;s/"//')
+fi
+
+if [ -z "$FLIGHT_ID" ]; then
+echo -e "${RED}Failed to create test flight, some tests will be skipped${NC}"
+echo "Response was: $CREATE_RESPONSE"
+else
+  echo -e "${GREEN}Successfully created test flight with ID: $FLIGHT_ID${NC}"
+fi
+
+# Test 3: Get flight details
+if [ ! -z "$FLIGHT_ID" ]; then
+run_test "Get Flight Details" "curl -s -H \"$AUTH_HEADER\" -X GET \"$API_URL/flight/$FLIGHT_ID\"" "200"
+fi
+
+# Test 4: Check if flight is delayed
+if [ ! -z "$FLIGHT_ID" ]; then
+run_test "Check Flight Delay" "curl -s -H \"$AUTH_HEADER\" -X GET \"$API_URL/check-delay/$FLIGHT_ID\"" "200"
+fi
+
+# Test 5: Get non-existent flight (should return 404)
+run_test "Get Non-existent Flight" "curl -s -i -H \"$AUTH_HEADER\" -X GET \"$API_URL/flight/non-existent-id\"" "404"
+
+# Test 6: Get average departure delay
+run_test "Get Average Departure Delay" "curl -s -H \"$AUTH_HEADER\" -X GET \"$API_URL/avg-dep-delay\"" "200"
+
+# Test 7: Get average departure delay for specific airline
+run_test "Get Average Departure Delay for Specific Airline" "curl -s -H \"$AUTH_HEADER\" -X GET \"$API_URL/avg-dep-delay?id=UA\"" "200"
+
+# Test 8: Get top destinations
+run_test "Get Top Destinations" "curl -s -H \"$AUTH_HEADER\" -X GET \"$API_URL/top-destinations/5\"" "200"
+
+# Test 9: Update flight details
+if [ ! -z "$FLIGHT_ID" ]; then
+run_test "Update Flight" "curl -s -H \"$AUTH_HEADER\" -X PUT \"$API_URL/flights/$FLIGHT_ID\" \
+    -H \"Content-Type: application/json\" \
+    -d '{\"arr_time\":1200, \"dep_delay\":15}'
+  " "200"
+fi
+
+# Test 10: Invalid input (requesting negative number of destinations)
+run_test "Invalid Input" "curl -s -i -H \"$AUTH_HEADER\" -X GET \"$API_URL/top-destinations/-1\"" "400"
+
+# Test 11: Rate limit test (this might not trigger the rate limit)
+echo -e "\n--- Testing rate limit (making multiple requests) ---"
+for i in {1..10}; do
+curl -s -H "$AUTH_HEADER" -X GET "$API_URL/avg-dep-delay" > /dev/null
+echo "Request $i completed"
+done
+run_test "Rate Limit Test (might not trigger)" "curl -s -i -H \"$AUTH_HEADER\" -X GET \"$API_URL/avg-dep-delay\"" "200"
+
+# Test 12: Delete flight
+if [ ! -z "$FLIGHT_ID" ]; then
+run_test "Delete Flight" "curl -s -H \"$AUTH_HEADER\" -X DELETE \"$API_URL/flight/$FLIGHT_ID\"" "200"
+
+# Test 13: Verify flight is deleted (should return 404)
+run_test "Verify Flight Deleted" "curl -s -i -H \"$AUTH_HEADER\" -X GET \"$API_URL/flight/$FLIGHT_ID\"" "404"
+fi
+
+# Test 14: Missing required field in POST request
+run_test "Missing Required Field" "curl -s -i -H \"$AUTH_HEADER\" -X POST \"$API_URL/flight\" \
+  -H \"Content-Type: application/json\" \
+  -d '{\"carrier\":\"UA\", \"origin\":\"JFK\"}'" "400"
+
+# Print summary
+echo -e "\n---------------------------------------------------"
+echo -e "TEST SUMMARY:"
+echo -e "---------------------------------------------------"
+echo -e "${GREEN}PASSED: $TESTS_PASSED${NC}"
+echo -e "${RED}FAILED: $TESTS_FAILED${NC}"
+echo -e "TOTAL: $((TESTS_PASSED + TESTS_FAILED))"
+echo -e "---------------------------------------------------"
+
+if [ $TESTS_FAILED -eq 0 ]; then
+echo -e "${GREEN}All tests passed!${NC}"
+exit 0
+else
+  echo -e "${RED}Some tests failed.${NC}"
+exit 1
+fi

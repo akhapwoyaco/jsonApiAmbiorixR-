@@ -1,0 +1,89 @@
+#!/bin/bash
+# Step-by-step debugging script for Flight API
+
+# Configuration
+API_URL="http://localhost:3000"
+AUTH_TOKEN="dev-token-123"
+AUTH_HEADER="Authorization: Bearer $AUTH_TOKEN"
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+echo -e "${YELLOW}=============================================${NC}"
+echo -e "${YELLOW}     FLIGHT API STEP-BY-STEP DIAGNOSTICS     ${NC}"
+echo -e "${YELLOW}=============================================${NC}"
+
+# Step 1: Basic connectivity test
+echo -e "\n${YELLOW}STEP 1: Testing basic server connectivity${NC}"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$API_URL")
+
+if [ "$HTTP_CODE" = "000" ]; then
+echo -e "${RED}ERROR: Cannot connect to server at $API_URL${NC}"
+echo "Please check if the R server is running on port 3000"
+exit 1
+else
+  echo -e "${GREEN}✓ Server is reachable (Status: $HTTP_CODE)${NC}"
+fi
+
+# Step 2: Test each endpoint individually with verbose output
+echo -e "\n${YELLOW}STEP 2: Testing authentication endpoint behavior${NC}"
+echo "Sending request WITHOUT auth token..."
+curl -v "$API_URL/avg-dep-delay" 2>&1 | grep -E "< HTTP|Authorization|ERROR"
+echo -e "\nSending request WITH auth token..."
+curl -v -H "$AUTH_HEADER" "$API_URL/avg-dep-delay" 2>&1 | grep -E "< HTTP|Authorization|ERROR"
+
+# Step 3: Detailed endpoint test - POST /flight
+echo -e "\n${YELLOW}STEP 3: Detailed test of flight creation endpoint${NC}"
+echo "Sending properly formatted POST request..."
+CREATE_RESPONSE=$(curl -v -H "$AUTH_HEADER" -X POST "$API_URL/flight" \
+                  -H "Content-Type: application/json" \
+                  -d '{
+    "carrier": "UA",
+    "origin": "JFK",
+    "dest": "LAX",
+    "dep_time": 800,
+    "arr_time": 1100
+  }' 2>&1)
+
+echo -e "\n${YELLOW}Request details:${NC}"
+echo "$CREATE_RESPONSE" | grep -E "^> |^< "
+
+echo -e "\n${YELLOW}Response body:${NC}"
+echo "$CREATE_RESPONSE" | grep -v "^[<>]"
+
+# Step 4: Database check - if flight creation failed
+echo -e "\n${YELLOW}STEP 4: Testing database connection directly${NC}"
+echo "Sending request to check if database can be queried..."
+curl -v -H "$AUTH_HEADER" "$API_URL/top-destinations/1" 2>&1 | grep -E "< HTTP|ERROR|dest"
+
+# Step 5: Middleware validation test
+echo -e "\n${YELLOW}STEP 5: Testing middleware validation${NC}"
+echo "Testing rate limiting (multiple requests)..."
+for i in {1..3}; do
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH_HEADER" "$API_URL/avg-dep-delay")
+echo "Request $i - Status: $HTTP_CODE"
+done
+
+echo -e "\nTesting validation with missing fields..."
+curl -v -H "$AUTH_HEADER" -X POST "$API_URL/flight" \
+-H "Content-Type: application/json" \
+-d '{"carrier":"UA"}' 2>&1 | grep -E "< HTTP|ERROR|missing"
+
+echo -e "\n${YELLOW}=============================================${NC}"
+echo -e "${YELLOW}     DIAGNOSTICS COMPLETE - SUMMARY     ${NC}"
+echo -e "${YELLOW}=============================================${NC}"
+
+echo "Based on these tests, you should check:"
+echo "1. If the auth_middleware function is properly registered"
+echo "2. If the database was properly initialized"
+echo "3. If error handling is working correctly"
+echo "4. If request validation is functioning"
+echo ""
+echo "Next steps:"
+echo "- Check the R server console for errors"
+echo "- Examine api.log for detailed error messages"
+echo "- Verify all required R packages are installed"
+echo "- Make sure flights.db exists and has proper permissions"

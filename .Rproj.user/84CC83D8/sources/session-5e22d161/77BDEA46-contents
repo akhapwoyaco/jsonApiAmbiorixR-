@@ -1,0 +1,877 @@
+#
+library(data.table)
+library(nycflights13)
+library(DBI)
+library(RSQLite)
+library(jsonlite)
+library(ambiorix)
+library(uuid)
+
+
+#===============================================================================
+# Configuration
+#===============================================================================
+
+config <- list(
+  port = 3000,
+  db_path = "flights.db",
+  log_path = "api.log",
+  rate_limit = 100,  # requests per minute
+  cache_ttl = 300,   # cache timeout in seconds
+  auth_token = "dev-token-123"  # In production, use proper authentication
+)
+
+# initialize logger
+log_setup <- function(){
+  logger::log_threshold(logger::DEBUG)
+  logger::log_appender(logger::appender_file(config$log_path))
+  # Also log to console for debugging
+  # logger::log_appender(logger::appender_console())
+}
+
+# Part 1: Data Processing
+# Load and transform the flights dataset
+process_flights_data <- function() {
+  
+  logger::log_info("Starting data processing ... ")
+  
+  # Convert flights data to data.table
+  flights_dt <- as.data.table(nycflights13::flights)
+  
+  # Add unique ID for each flight
+  # flights_dt[, flight_id := uuid::UUIDgenerate(.N)]
+  
+  # Add unique ID for each flight
+  flights_dt[, flight_id := sapply(1:.N, function(x) uuid::UUIDgenerate())]
+  
+  # Add delayed column (TRUE if delay > 15 minutes)
+  flights_dt[, is_delayed := dep_delay > 15]
+  
+  # Calculate average departure delay by carrier
+  avg_delays <- flights_dt[, .(avg_delay = mean(dep_delay, na.rm = TRUE)), by = carrier]
+  
+  # Find top destinations by flight count
+  top_destinations <- flights_dt[, .N, by = dest][order(-N)]
+  
+  logger::log_info("Ending data processing ... ")
+  
+  return(list(
+    flights = flights_dt,
+    avg_delays = avg_delays,
+    top_destinations = top_destinations
+  ))
+}
+
+# Initialize SQLite database
+setup_database <- function(processed_data) {
+  
+  logger::log_info("Setting database ... ")
+  
+  # Ensure database file is writable 
+  if(file.exists(config$db_path)) {
+    file.remove(config$db_path)
+    logger::log_info("Removed existing database file")
+  }
+  
+  con <- dbConnect(RSQLite::SQLite(), config$db_path)       # "flights.db")
+  on.exit(dbDisconnect(con), add = TRUE)
+  
+  # # Create flights table
+  # dbWriteTable(con, "flights", processed_data$flights, overwrite = TRUE)
+  
+  # Create flights table
+  logger::log_info("Writing flights data to database")
+  tryCatch({
+    dbWriteTable(con, "flights", processed_data$flights, overwrite = TRUE)
+    logger::log_info("Successfully wrote flights data")
+  }, error = function(e) {
+    logger::log_error(paste("Error writing flights data:", e$message))
+    stop(e)
+  })
+  
+  # # Create indexes for better query performance
+  # dbExecute(con, "CREATE INDEX idx_flight_id ON flights(flight_id)")
+  # dbExecute(con, "CREATE INDEX idx_carrier ON flights(carrier)")
+  # 
+  # dbDisconnect(con)
+  # 
+  # logger::log_info("Setting database completed ... ")
+  
+  # Create indexes for better query performance
+  dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_flight_id ON flights(flight_id)")
+  dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_carrier ON flights(carrier)")
+  
+  logger::log_info("Setting database completed ... ")
+  
+}
+
+# Database helper functions
+get_db_connection <- function() {
+  # dbConnect(RSQLite::SQLite(), config$db_path)      # "flights.db")
+  
+  tryCatch({
+    con <- dbConnect(RSQLite::SQLite(), config$db_path)
+    return(con)
+  }, error = function(e) {
+    logger::log_error(paste("Database connection error:", e$message))
+    stop("Database connection failed")
+  })
+  
+}
+
+
+
+
+#===============================================================================
+# Middleware Functions
+#===============================================================================
+
+#' Rate limiting middleware
+#' 
+#' @param req Request object
+#' @param res Response object
+#' @return Boolean indicating if request should proceed
+rate_limit_middleware <- function(req, res) {
+  
+  # Simple rolling window rate limiting
+  timestamp <- as.numeric(Sys.time())
+  key <- req$remote_addr
+  
+  # Initialize or get request history
+  if (!exists("request_history")) {
+    request_history <<- new.env()
+  }
+  
+  if (!exists(key, request_history)) {
+    request_history[[key]] <- numeric()
+  }
+  
+  # Clean old requests
+  request_history[[key]] <- request_history[[key]][request_history[[key]] > (timestamp - 60)]
+  
+  # Check rate limit
+  if (length(request_history[[key]]) >= config$rate_limit) {
+    res$status <- 429
+    res$send(list(error = "Rate limit exceeded"))
+    return(FALSE)
+  }
+  
+  # Add current request
+  request_history[[key]] <- c(request_history[[key]], timestamp)
+  
+  # Call next middleware/handler if provided
+  # if (!is.null(next)) next()
+  
+  return(TRUE)
+}
+
+
+#' Authentication middleware
+#' 
+#' @param req Request object
+#' @param res Response object
+#' @return Boolean indicating if request should proceed
+auth_middleware <- function(req, res) {
+  
+  auth_header <- req$headers$Authorization
+  
+  # Debug log the auth header
+  logger::log_debug(paste("Auth header:", auth_header))
+  logger::log_debug(paste("Expected:", paste("Bearer", config$auth_token)))
+  
+  if (is.null(auth_header) || auth_header != paste("Bearer", config$auth_token)) {
+    logger::log_warn("Authentication failed")
+    res$status <- 401
+    res$send(list(error = "Unauthorized"))
+    return(FALSE)
+  }
+  
+  # Call next middleware/handler if provided
+  # if (!is.null(next)) next()
+  
+  return(TRUE)
+}
+
+#' Request validation middleware
+#' 
+#' @param schema List defining expected request structure
+#' @return Function that validates request against schema
+validate_request <- function(schema) {
+  function(req, res) {
+    if (!is.null(schema$params)) {
+      for (param in names(schema$params)) {
+        if (is.null(req$params[[param]])) {
+          res$status <- 400
+          res$send(list(error = sprintf("Missing required parameter: %s", param)))
+          return(FALSE)
+        }
+      }
+    }
+    #
+    if (!is.null(schema$body)) {
+      body <- tryCatch({
+        if (is.character(req$body) && nchar(req$body) > 0) {
+          fromJSON(req$body)
+        } else {
+          NULL
+        }
+      }, error = function(e) NULL)
+      
+      if (is.null(body)) {
+        res$status <- 400
+        res$json(list(error = "Invalid request body"))
+        return(FALSE)
+      }
+      
+      for (field in schema$body) {
+        if (is.null(body[[field]])) {
+          res$status <- 400
+          res$json(list(error = sprintf("Missing required field: %s", field)))
+          return(FALSE)
+        }
+      }
+    }
+    #
+    # if (!is.null(schema$body)) {
+    #   body <- tryCatch(
+    #     fromJSON(req$body),
+    #     error = function(e) NULL
+    #   )
+    #   
+    #   if (is.null(body)) {
+    #     res$status <- 400
+    #     res$send(list(error = "Invalid request body"))
+    #     return(FALSE)
+    #   }
+    #   
+    #   for (field in schema$body) {
+    #     if (is.null(body[[field]])) {
+    #       res$status <- 400
+    #       res$send(list(error = sprintf("Missing required field: %s", field)))
+    #       return(FALSE)
+    #     }
+    #   }
+    # }
+    # Call next middleware/handler if provided
+    # if (!is.null(next)) next()
+    
+    return(TRUE)
+  }
+}
+
+#===============================================================================
+# Error Handling
+#===============================================================================
+
+#' Global error handler
+#' 
+#' @param err Error object
+#' @return List containing error details
+handle_error <- function(err) {
+  logger::log_error(sprintf("Error: %s", err$message))
+  
+  list(
+    error = TRUE,
+    message = err$message,
+    status = 500,
+    timestamp = format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  )
+}
+
+#===============================================================================
+# Cache Implementation
+#===============================================================================
+
+#' Cache wrapper for database queries
+#' 
+#' @param func Function to cache
+#' @return Memoized function with timeout
+cache_query <- function(func) {
+  memoise::memoise(
+    func,
+    ~memoise::timeout(config$cache_ttl)
+  )
+}
+
+# Part 2: API Implementation
+create_app <- function() {
+  app <- Ambiorix$new()
+  
+  # Debug middleware to log requests
+  app$use(function(req, res) {
+    logger::log_debug(paste("Received request:", req$method, req$path))
+    return(TRUE)
+  })
+  
+  # Add middleware - IMPORTANT! These need to be BEFORE route handlers
+  app$use(rate_limit_middleware)
+  app$use(auth_middleware)
+  
+  # Basic health check that doesn't require auth
+  app$get("/health", function(req, res) {
+    res$json(list(status = "ok", message = "API is running"))
+  }#, use_middlewares = FALSE
+  )  # Skip middlewares for health check
+  
+  # 1. POST /flight - Create new flight
+  app$post(
+    "/flight", 
+    function(req, res) {
+      tryCatch({
+        # Debug log the request body
+        logger::log_debug(paste("Request body:", req$body))
+        
+        # Safely parse JSON with error handling
+        if (is.null(req$body) || req$body == "") {
+          res$status <- 400
+          res$json(list(error = "Empty request body"))
+          return()
+        }
+        
+        flight_data <- tryCatch({
+          fromJSON(req$body)
+        }, error = function(e) {
+          logger::log_error(paste("JSON parse error:", e$message))
+          res$status <- 400
+          res$json(list(error = "Invalid JSON in request body"))
+          return(NULL)
+        })
+        
+        if (is.null(flight_data)) return()
+        
+        # flight_data <- fromJSON(req$body)
+        flight_data$flight_id <- uuid::UUIDgenerate()
+        
+        con <- get_db_connection()
+        on.exit(dbDisconnect(con), add = TRUE)
+        
+        # Convert to data frame first
+        flight_df <- as.data.frame(flight_data)
+        dbWriteTable(con, "flights", flight_df, append = TRUE)
+        
+        logger::log_info(sprintf("Created flight: %s", flight_data$flight_id))
+        
+        res$json(list(
+          success = TRUE,
+          flight_id = flight_data$flight_id
+        ))
+      }, error = function(err) {
+        logger::log_error(paste("Error creating flight:", err$message))
+        res$status <- 500
+        res$json(handle_error(err))
+      })
+    })
+  
+  # 2. GET /flight/:id - Get flight details
+  app$get("/flight/:id", function(req, res) {
+    tryCatch({
+      logger::log_debug(paste("GET /flight/:id called with id:", req$params$id))
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      flight <- dbGetQuery(
+        con,
+        "SELECT * FROM flights WHERE flight_id = ?",
+        params = unlist(req$params$id) ###
+      )
+      
+      if (nrow(flight) == 0) {
+        res$status <- 404
+        res$json(list(error = "Flight not found"))
+        return()
+      }
+      
+      res$json(flight)
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  # 3. GET /check-delay/:id - Check if flight was delayed
+  app$get("/check-delay/:id", function(req, res) {
+    tryCatch({
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      delay_status <- dbGetQuery(
+        con,
+        "SELECT is_delayed FROM flights WHERE flight_id = ?",
+        params = unlist(req$params$id) ###
+      )
+      
+      if (nrow(delay_status) == 0) {
+        res$status <- 404
+        res$json(list(error = "Flight not found"))
+        return()
+      }
+      
+      res$json(list(
+        flight_id = req$params$id,
+        is_delayed = delay_status$is_delayed
+      ))
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  # 4. GET /avg-dep-delay - Get average delay by airline
+  app$get("/avg-dep-delay", function(req, res) {
+    tryCatch({
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      airline <- req$query$id
+      
+      query <- if (!is.null(airline)) {
+        list(
+          sql = "SELECT carrier, AVG(dep_delay) as avg_delay 
+                 FROM flights 
+                 WHERE carrier = ? 
+                 GROUP BY carrier",
+          params = unlist(airline) ###
+        )
+      } else {
+        list(
+          sql = "SELECT carrier, AVG(dep_delay) as avg_delay 
+                 FROM flights 
+                 GROUP BY carrier",
+          params = list()
+        )
+      }
+      
+      delays <- dbGetQuery(con, query$sql, params = unlist(query$params))####
+      res$json(delays)
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  # 5. GET /top-destinations/:n - Get top n destinations
+  app$get("/top-destinations/:n", function(req, res) {
+    tryCatch({
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      n <- as.integer(req$params$n)
+      
+      if (is.na(n) || n <= 0) {
+        res$status <- 400
+        res$json(list(error = "Invalid number of destinations requested"))
+        return()
+      }
+      
+      top_dest <- dbGetQuery(
+        con,
+        "SELECT dest, COUNT(*) as flight_count 
+         FROM flights 
+         GROUP BY dest 
+         ORDER BY flight_count DESC 
+         LIMIT ?",
+        params = list(n)
+      )
+      
+      res$json(top_dest)
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  # 6. PUT /flights/:id - Update flight details
+  app$put("/flight/:id", function(req, res) {
+    tryCatch({
+      flight_data <- fromJSON(req$body)
+      
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      # Check if flight exists
+      exists <- dbGetQuery(
+        con,
+        "SELECT 1 FROM flights WHERE flight_id = ?",
+        params = unlist(req$params$id) ###
+      )
+      
+      if (nrow(exists) == 0) {
+        res$status <- 404
+        res$json(list(error = "Flight not found"))
+        return()
+      }
+      
+      # Build update query dynamically based on provided fields
+      update_fields <- names(flight_data)
+      set_clause <- paste(update_fields, "= ?", collapse = ", ")
+      
+      query <- sprintf(
+        "UPDATE flights SET %s WHERE flight_id = ?",
+        set_clause
+      )
+      
+      params <- c(as.list(flight_data), list(req$params$id))
+      
+      dbExecute(con, query, params = params)
+      
+      res$json(list(
+        success = TRUE,
+        message = "Flight updated successfully"
+      ))
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  # 7. DELETE /flight/:id - Delete flight
+  app$delete("/flight/:id", function(req, res) {
+    tryCatch({
+      con <- get_db_connection()
+      on.exit(dbDisconnect(con), add = TRUE)
+      
+      result <- dbExecute(
+        con,
+        "DELETE FROM flights WHERE flight_id = ?",
+        params = list(req$params$id)
+      )
+      
+      if (result == 0) {
+        res$status <- 404
+        res$json(list(error = "Flight not found"))
+        return()
+      }
+      
+      res$json(list(
+        success = TRUE,
+        message = "Flight deleted successfully"
+      ))
+    }, error = function(err) {
+      res$status <- 500
+      res$json(handle_error(err))
+    })
+  })
+  
+  return(app)
+}
+
+#===============================================================================
+# Server Initialization
+#===============================================================================
+
+# Initialize application
+init_app <- function() {
+  # Set start time
+  Sys.setenv(R_START_TIME = as.character(Sys.time()))
+  
+  # Setup logging
+  log_setup()
+  
+  # Process data and setup database
+  logger::log_info("Initializing application")
+  
+  # Process data and setup database
+  processed_data <- process_flights_data()
+  setup_database(processed_data)
+  
+  # Create app with routes
+  app <- create_app()
+  
+  # Start server
+  logger::log_info(sprintf("Starting server on port %d", config$port))
+  app$start(port = config$port)
+}
+
+# For non-test mode, start the application
+if (!interactive()) {
+  init_app()
+}
+
+
+
+# # Part 2: API Implementation
+# app <- Ambiorix$new()
+# 
+# # Add middleware
+# app$use(rate_limit_middleware)
+# app$use(auth_middleware)
+# 
+# # 1. POST /flight - Create new flight
+# app$post(
+#   "/flight", 
+#   validate_request(list(
+#     body = c("carrier", "origin", "dest", "dep_time", "arr_time")
+#   )),
+#   function(req, res) {
+#     tryCatch({
+#       flight_data <- fromJSON(req$body)
+#       flight_data$flight_id <- uuid::UUIDgenerate()
+#       
+#       con <- get_db_connection()
+#       on.exit(dbDisconnect(con))
+#       
+#       dbWriteTable(con, "flights", as.data.frame(flight_data), append = TRUE)
+#       
+#       logger::log_info(sprintf("Created flight: %s", flight_data$flight_id))
+#       
+#       res$send(list(
+#         success = TRUE,
+#         flight_id = flight_data$flight_id
+#       ))
+#     }, error = function(err){
+#       res$status <- 500
+#       res$send(handle_error(err))
+#     })
+#   }
+# )
+# 
+# # 2. GET /flight/:id - Get flight details
+# app$get("/flight/:id", function(req, res) {
+#   tryCatch({
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     flight <- dbGetQuery(
+#       con,
+#       "SELECT * FROM flights WHERE flight_id = ?",
+#       params = list(req$params$id)
+#     )
+#     
+#     if (nrow(flight) == 0) {
+#       res$status <- 404
+#       res$send(list(error = "Flight not found"))
+#       return()
+#     }
+#     
+#     res$send(flight)
+#   }, error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # 3. GET /check-delay/:id - Check if flight was delayed
+# app$get("/check-delay/:id", function(req, res) {
+#   tryCatch({
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     delay_status <- dbGetQuery(
+#       con,
+#       "SELECT is_delayed FROM flights WHERE flight_id = ?",
+#       params = list(req$params$id)
+#     )
+#     
+#     if (nrow(delay_status) == 0) {
+#       res$status <- 404
+#       res$send(list(error = "Flight not found"))
+#       return()
+#     }
+#     
+#     res$send(list(
+#       flight_id = req$params$id,
+#       is_delayed = delay_status$is_delayed
+#     ))
+#   }, error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # 4. GET /avg-dep-delay - Get average delay by airline
+# app$get("/avg-dep-delay", function(req, res) {
+#   tryCatch({
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     airline <- req$query$id
+#     
+#     query <- if (!is.null(airline)) {
+#       list(
+#         sql = "SELECT carrier, AVG(dep_delay) as avg_delay 
+#                FROM flights 
+#                WHERE carrier = ? 
+#                GROUP BY carrier",
+#         params = list(airline)
+#       )
+#     } else {
+#       list(
+#         sql = "SELECT carrier, AVG(dep_delay) as avg_delay 
+#                FROM flights 
+#                GROUP BY carrier",
+#         params = list()
+#       )
+#     }
+#     
+#     delays <- dbGetQuery(con, query$sql, params = query$params)
+#     res$send(delays)
+#   },error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # 5. GET /top-destinations/:n - Get top n destinations
+# app$get("/top-destinations/:n", function(req, res) {
+#   tryCatch({
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     n <- as.integer(req$params$n)
+#     
+#     if (is.na(n) || n <= 0) {
+#       res$status <- 400
+#       res$send(list(error = "Invalid number of destinations requested"))
+#       return()
+#     }
+#     
+#     top_dest <- dbGetQuery(
+#       con,
+#       "SELECT dest, COUNT(*) as flight_count 
+#        FROM flights 
+#        GROUP BY dest 
+#        ORDER BY flight_count DESC 
+#        LIMIT ?",
+#       params = list(n)
+#     )
+#     
+#     res$send(top_dest)
+#   },error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # 6. PUT /flights/:id - Update flight details
+# app$put("/flights/:id", function(req, res) {
+#   tryCatch({
+#     flight_data <- fromJSON(req$body)
+#     
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     # Check if flight exists
+#     exists <- dbGetQuery(
+#       con,
+#       "SELECT 1 FROM flights WHERE flight_id = ?",
+#       params = list(req$params$id)
+#     )
+#     
+#     if (nrow(exists) == 0) {
+#       res$status <- 404
+#       res$send(list(error = "Flight not found"))
+#       return()
+#     }
+#     
+#     # Build update query dynamically based on provided fields
+#     update_fields <- names(flight_data)
+#     set_clause <- paste(update_fields, "= ?", collapse = ", ")
+#     
+#     query <- sprintf(
+#       "UPDATE flights SET %s WHERE flight_id = ?",
+#       set_clause
+#     )
+#     
+#     params <- c(as.list(flight_data), list(req$params$id))
+#     
+#     dbExecute(con, query, params = params)
+#     
+#     res$send(list(
+#       success = TRUE,
+#       message = "Flight updated successfully"
+#     ))
+#   }, error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # 7. DELETE /:id - Delete flight
+# app$delete(":id", function(req, res) {
+#   tryCatch({
+#     con <- get_db_connection()
+#     on.exit(dbDisconnect(con))
+#     
+#     result <- dbExecute(
+#       con,
+#       "DELETE FROM flights WHERE flight_id = ?",
+#       params = list(req$params$id)
+#     )
+#     
+#     if (result == 0) {
+#       res$status <- 404
+#       res$send(list(error = "Flight not found"))
+#       return()
+#     }
+#     
+#     res$send(list(
+#       success = TRUE,
+#       message = "Flight deleted successfully"
+#     ))
+#   }, error = function(err){
+#     res$status <- 500
+#     res$send(handle_error(err))
+#   })
+# })
+# 
+# # # Start the server
+# # app$start(port = 3000)
+# # #
+# #===============================================================================
+# # Server Initialization
+# #===============================================================================
+# 
+# # Initialize application
+# init_app <- function() {
+#   # Set start time
+#   Sys.setenv(R_START_TIME = as.character(Sys.time()))
+#   
+#   # Setup logging
+#   log_setup()
+#   
+#   # Process data and setup database
+#   logger::log_info("Initializing application")
+#   
+#   # Process data and setup database
+#   processed_data <- process_flights_data()
+#   setup_database(processed_data)
+#   
+#   # Start server
+#   logger::log_info(sprintf("Starting server on port %d", config$port))
+#   app$start(port = config$port)
+# }
+# 
+# # Start the application
+# init_app()
+# #
+# # Function to start the application in test mode
+# # start_test_app <- function(port = 3001) {
+# #   old_port <- config$port
+# #   config$port <- port
+# #   
+# #   # Process data and setup database
+# #   processed_data <- process_flights_data()
+# #   setup_database(processed_data)
+# #   
+# #   # Start server without blocking
+# #   app$start(port = config$port)#, background = TRUE)
+# #   
+# #   # wait briefly for server to start
+# #   Sys.sleep(1)
+# #   
+# #   # Return original config to restore later
+# #   list(old_port = old_port)
+# # }
+# # 
+# # # Function to stop the test app
+# # stop_test_app <- function(old_config) {
+# #   app$stop()
+# #   config$port <- old_config$old_port
+# # }
+# # 
+# # # For non-test mode, start the application
+# # if (!interactive()) {
+# #   init_app()
+# # }
+# # 
+# # init_app()

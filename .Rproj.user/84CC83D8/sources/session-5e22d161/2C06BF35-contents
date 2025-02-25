@@ -1,0 +1,83 @@
+# R Server Troubleshooting Script
+# Save this as troubleshoot.R
+
+library(jsonlite)
+library(logger)
+
+# Configuration
+config <- list(
+  port = 3000,
+  db_path = "flights.db",
+  log_path = "api.log",
+  auth_token = "dev-token-123"
+)
+
+# Simple test endpoint to verify the server works
+test_app <- function() {
+  library(ambiorix)
+  
+  app <- Ambiorix$new()
+  
+  # Basic health check endpoint
+  app$get("/health", function(req, res) {
+    res$send(list(status = "ok", message = "Server is running"))
+  })
+  
+  # Echo authentication header
+  app$get("/echo-auth", function(req, res) {
+    auth_header <- req$headers$Authorization
+    
+    if (is.null(auth_header)) {
+      res$status <- 401
+      res$send(list(status = "error", message = "No auth header"))
+    } else {
+      res$send(list(status = "ok", auth = auth_header))
+    }
+  })
+  
+  # Test database connection
+  app$get("/test-db", function(req, res) {
+    tryCatch({
+      con <- DBI::dbConnect(RSQLite::SQLite(), config$db_path)
+      
+      # Check if flights table exists
+      tables <- DBI::dbListTables(con)
+      has_flights <- "flights" %in% tables
+      
+      # Count flights if table exists
+      flight_count <- 0
+      if (has_flights) {
+        flight_count <- DBI::dbGetQuery(con, "SELECT COUNT(*) as count FROM flights")[1, "count"]
+      }
+      
+      DBI::dbDisconnect(con)
+      
+      res$send(list(
+        status = "ok",
+        db_exists = file.exists(config$db_path),
+        tables = tables,
+        has_flights_table = has_flights,
+        flight_count = flight_count
+      ))
+    }, error = function(e) {
+      res$status <- 500
+      res$send(list(
+        status = "error",
+        message = e$message,
+        db_exists = file.exists(config$db_path)
+      ))
+    })
+  })
+  
+  # Start the server
+  cat("Starting test server on port", config$port, "\n")
+  cat("Try these commands to test:\n")
+  cat("1. curl -s http://localhost:3000/health\n")
+  cat("2. curl -s -H \"Authorization: Bearer dev-token-123\" http://localhost:3000/echo-auth\n")
+  cat("3. curl -s http://localhost:3000/test-db\n")
+  
+  app$start(port = config$port)
+}
+
+# Run the test app
+test_app()

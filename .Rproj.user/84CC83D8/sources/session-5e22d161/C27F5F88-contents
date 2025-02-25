@@ -1,0 +1,697 @@
+# test_flights_api.R
+library(testthat)
+library(data.table)
+library(nycflights13)
+library(DBI)
+library(RSQLite)
+library(jsonlite)
+library(httr)
+library(uuid)
+
+source(file = "flight_app.R")
+
+# Setup test environment
+setup_test_env <- function() {
+  
+  # Use a test database
+  old_db_path <- config$db_path
+  config$db_path <- "test_flights.db"
+  
+  # Process data and setup test database
+  processed_data <- process_flights_data()
+  setup_database(processed_data)
+  
+  # Start test server
+  app_config <- start_test_app(port = 3001)
+  
+  # Return sample data for tests
+  sample_flight <- processed_data$flights[1]
+  return(list(
+    sample_flight = sample_flight,
+    processed_data = processed_data,
+    old_db_path = old_db_path,
+    app_config = app_config
+  ))
+}
+
+# Cleanup test environment
+cleanup_test_env <- function(test_env) {
+  # Stop test server
+  stop_test_app(test_env$app_config)
+  
+  # Restore original config
+  config$db_path <- test_env$old_db_path
+  
+  # Remove test database
+  if (file.exists("test_flights.db")) {
+    file.remove("test_flights.db")
+  }
+}
+
+# Helper function for API calls
+api_call <- function(method, endpoint, body = NULL, params = NULL) {
+  url <- paste0("http://localhost:", config$port, endpoint)
+  
+  # Add query parameters if provided
+  if (!is.null(params)) {
+    url <- paste0(url, "?", paste(names(params), params, sep = "=", collapse = "&"))
+  }
+  
+  # Prepare the request
+  headers <- add_headers(Authorization = paste("Bearer", config$auth_token))
+  
+  # Execute request based on method
+  if (method == "GET") {
+    response <- GET(url, headers)
+  } else if (method == "POST") {
+    response <- POST(url, headers, body = body, encode = "json")
+  } else if (method == "PUT") {
+    response <- PUT(url, headers, body = body, encode = "json")
+  } else if (method == "DELETE") {
+    response <- DELETE(url, headers)
+  }
+  
+  # Parse response
+  content <- NULL
+  if (http_type(response) == "application/json") {
+    content <- content(response, "parsed")
+  } else {
+    content <- content(response, "text")
+  }
+  
+  return(list(
+    status = status_code(response),
+    content = content
+  ))
+}
+
+# Setup test data
+test_env <- setup_test_env()
+sample_flight <- test_env$sample_flight
+
+# Wait a moment for the server to start
+Sys.sleep(1)
+
+# Main test group
+context("Flight API Tests")
+
+# Test data processing
+test_that("process_flights_data transforms data correctly", {
+  processed_data <- test_env$processed_data
+  
+  # Check if flights data.table is created
+  expect_true(is.data.table(processed_data$flights))
+  
+  # Check if flight_id is generated
+  expect_true("flight_id" %in% names(processed_data$flights))
+  
+  # Check if is_delayed column is properly calculated
+  expect_true("is_delayed" %in% names(processed_data$flights))
+  expect_equal(processed_data$flights[1]$is_delayed, processed_data$flights[1]$dep_delay > 15)
+  
+  # Check if average delays are calculated by carrier
+  expect_true(is.data.table(processed_data$avg_delays))
+  expect_equal(names(processed_data$avg_delays), c("carrier", "avg_delay"))
+  
+  # Check if top destinations are calculated
+  expect_true(is.data.table(processed_data$top_destinations))
+  expect_equal(names(processed_data$top_destinations), c("dest", "N"))
+})
+
+# Test database setup
+test_that("setup_database creates database correctly", {
+  # Check if database file exists
+  expect_true(file.exists(config$db_path))
+  
+  # Check if flights table exists with correct schema
+  con <- dbConnect(RSQLite::SQLite(), config$db_path)
+  tables <- dbListTables(con)
+  expect_true("flights" %in% tables)
+  
+  # Check if indexes are created
+  indexes <- dbGetQuery(con, "PRAGMA index_list('flights')")
+  index_names <- indexes$name
+  expect_true("idx_flight_id" %in% index_names)
+  expect_true("idx_carrier" %in% index_names)
+  
+  dbDisconnect(con)
+})
+
+# Test middleware functions
+test_that("rate_limit_middleware enforces rate limits", {
+  # Mock request and response objects
+  req <- list(remote_addr = "127.0.0.1")
+  res <- list(status = 200, send = function(x) x) #429
+ 
+  # Reset request history for this test
+  if (exists("request_history")) {
+    rm(request_history, envir = .GlobalEnv)
+  }
+   # print(req); print(res)
+  
+  # First request should be allowed
+  # First request should be allowed
+  result1 <- rate_limit_middleware(req, res)
+  expect_true(result1)
+  # expect_true(rate_limit_middleware(req, res))
+  
+  # Set up many requests
+  for (i in 1:(config$rate_limit-1)) {
+    rate_limit_middleware(req, res)
+  }
+  
+  # print(res$status)
+  # Last request before limit should be allowed
+  result2 <- rate_limit_middleware(req, res)
+  expect_true(result2)          #############################
+  
+  # Request exceeding limit should be blocked
+  result3 <- rate_limit_middleware(req, res)
+  expect_false(result3)
+  expect_equal(res$status, 429)  ####################
+  
+  # Next request should be blocked
+  # expect_false(rate_limit_middleware(req, res))
+  # expect_equal(res$status, 429)
+})
+
+
+
+test_that("auth_middleware validates authentication", {
+  # Mock request and response objects
+  req <- list(headers = list(Authorization = paste("Bearer", config$auth_token)))
+  res <- list(status = 200, send = function(x) x)
+  
+  # Valid token should be allowed
+  expect_true(auth_middleware(req, res))
+  
+  # Invalid token should be blocked
+  req$headers$Authorization <- "Bearer invalid-token"
+  expect_false(auth_middleware(req, res))
+  expect_equal(res$status, 401)
+  
+  # Missing token should be blocked
+  req$headers$Authorization <- NULL
+  expect_false(auth_middleware(req, res))
+})
+
+test_that("validate_request middleware validates input", {
+  # Define schema for validation
+  schema <- list(
+    params = list(id = TRUE),
+    body = c("carrier", "origin")
+  )
+  
+  # Create validator function
+  validator <- validate_request(schema)
+  
+  # Valid request should pass
+  req <- list(
+    params = list(id = "123"),
+    body = jsonlite::toJSON(list(carrier = "AA", origin = "JFK"))
+  )
+  res <- list(status = 200, send = function(x) x)
+  expect_true(validator(req, res))
+  
+  # Missing parameter should fail
+  req$params$id <- NULL
+  expect_false(validator(req, res))
+  expect_equal(res$status, 400) ###############################
+  
+  # Invalid JSON should fail
+  req$params$id <- "123"
+  req$body <- "invalid json"
+  expect_false(validator(req, res))
+})
+
+# Start server in a separate process for API tests
+# Note: In a real test environment, you'd use a proper test server setup
+# Here we're assuming the server is already running on the test port
+
+# Test API endpoints
+test_that("POST /flight creates a new flight", {
+  # Create new flight data
+  new_flight <- list(
+    carrier = "AA", 
+    origin = "JFK", 
+    dest = "LAX", 
+    dep_time = 800, 
+    arr_time = 1100
+  )
+  
+  # Send request
+  response <- api_call("POST", "/flight", body = new_flight)
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_true(response$content$success)
+  expect_true(!is.null(response$content$flight_id))
+  
+  # Store flight_id for later tests
+  flight_id <- response$content$flight_id
+  
+  # Verify flight exists in database
+  con <- dbConnect(RSQLite::SQLite(), config$db_path)
+  flight <- dbGetQuery(con, "SELECT * FROM flights WHERE flight_id = ?", params = list(flight_id))
+  dbDisconnect(con)
+  
+  expect_equal(nrow(flight), 1)
+  expect_equal(flight$carrier, "AA")
+})
+
+test_that("GET /flight/:id retrieves flight details", {
+  # First create a flight
+  new_flight <- list(
+    carrier = "UA", 
+    origin = "SFO", 
+    dest = "ORD", 
+    dep_time = 900, 
+    arr_time = 1500
+  )
+  
+  # Send POST request
+  response <- api_call("POST", "/flight", body = new_flight)
+  flight_id <- response$content$flight_id
+  
+  # Get flight details
+  response <- api_call("GET", paste0("/flight/", flight_id))
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_equal(response$content$carrier, "UA")
+  expect_equal(response$content$origin, "SFO")
+  
+  # Test invalid flight ID
+  response <- api_call("GET", "/flight/invalid-id")
+  expect_equal(response$status, 404)
+})
+
+test_that("GET /check-delay/:id checks if a flight was delayed", {
+  # Use a flight from the sample data
+  flight_id <- sample_flight$flight_id
+  
+  # Get delay status
+  response <- api_call("GET", paste0("/check-delay/", flight_id))
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_equal(response$content$flight_id, flight_id)
+  expect_equal(response$content$is_delayed, sample_flight$is_delayed)
+  
+  # Test invalid flight ID
+  response <- api_call("GET", "/check-delay/invalid-id")
+  expect_equal(response$status, 404)
+})
+
+test_that("GET /avg-dep-delay returns average delays", {
+  # Get all carrier delays
+  response <- api_call("GET", "/avg-dep-delay")
+  
+  # Verify response structure
+  expect_equal(response$status, 200)
+  expect_true(length(response$content) > 0)
+  expect_true("carrier" %in% names(response$content[[1]]))
+  expect_true("avg_delay" %in% names(response$content[[1]]))
+  
+  # Get delays for specific carrier
+  carrier <- sample_flight$carrier
+  response <- api_call("GET", "/avg-dep-delay", params = list(id = carrier))
+  
+  # Verify response is filtered
+  expect_equal(response$status, 200)
+  expect_equal(length(response$content), 1)
+  expect_equal(response$content[[1]]$carrier, carrier)
+})
+
+test_that("GET /top-destinations/:n returns top destinations", {
+  # Get top 5 destinations
+  response <- api_call("GET", "/top-destinations/5")
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_equal(length(response$content), 5)
+  
+  # Check for the fields that are actually returned
+  first_item <- response$content[[1]]
+  expect_true("dest" %in% names(first_item))
+  expect_true("flight_count" %in% names(first_item))
+  
+  # expect_true("dest" %in% names(response$content[[1]]))
+  # expect_true("flight_count" %in% names(response$content[[1]]))
+  
+  # Verify they're ordered by flight count
+  flight_counts <- sapply(response$content, function(x) x$flight_count)
+  expect_true(all(diff(flight_counts) <= 0))  # Check if in descending order
+  
+  # Test invalid parameter
+  response <- api_call("GET", "/top-destinations/invalid")
+  expect_equal(response$status, 400)
+})
+
+test_that("PUT /flights/:id updates flight details", {
+  # First create a flight
+  new_flight <- list(
+    carrier = "DL", 
+    origin = "ATL", 
+    dest = "LGA", 
+    dep_time = 1200, 
+    arr_time = 1400
+  )
+  
+  # Send POST request
+  response <- api_call("POST", "/flight", body = new_flight)
+  flight_id <- response$content$flight_id
+  
+  # Update flight
+  update_data <- list(
+    dest = "BOS",
+    arr_time = 1430
+  )
+  
+  response <- api_call("PUT", paste0("/flights/", flight_id), body = update_data)
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_true(response$content$success)
+  
+  # Check if update was applied
+  get_response <- api_call("GET", paste0("/flight/", flight_id))
+  expect_equal(get_response$content$dest, "BOS")
+  expect_equal(get_response$content$arr_time, 1430)
+  
+  # Test invalid flight ID
+  response <- api_call("PUT", "/flights/invalid-id", body = update_data)
+  expect_equal(response$status, 404)
+})
+
+test_that("DELETE /flights/:id deletes a flight", {
+  # First create a flight
+  new_flight <- list(
+    carrier = "AS", 
+    origin = "SEA", 
+    dest = "PDX", 
+    dep_time = 800, 
+    arr_time = 900
+  )
+  
+  # Send POST request
+  response <- api_call("POST", "/flight", body = new_flight)
+  flight_id <- response$content$flight_id
+  
+  # Delete flight
+  response <- api_call("DELETE", paste0("/", flight_id))
+  
+  # Verify response
+  expect_equal(response$status, 200)
+  expect_true(response$content$success)
+  
+  # Verify flight is deleted
+  get_response <- api_call("GET", paste0("/flight/", flight_id))
+  expect_equal(get_response$status, 404)
+  
+  # Test invalid flight ID
+  response <- api_call("DELETE", "/invalid-id")
+  expect_equal(response$status, 404)
+})
+
+# Clean up test environment
+cleanup_test_env(test_env = test_env)
+cat("All tests completed\n")
+
+# </antArtifact><antArtifact identifier="curl-tests" type="application/vnd.ant.code" language="bash" title="CURL Tests for API Endpoints">
+#   
+#   #!/bin/bash
+#   
+#   # ================================================================
+# # Flights API CURL Tests
+# # ================================================================
+# # This script provides comprehensive tests for the Flights API
+# # It tests all endpoints with valid and invalid inputs
+# # ================================================================
+# 
+# # Configuration
+# API_URL="http://localhost:3000"
+# AUTH_TOKEN="dev-token-123"
+# AUTH_HEADER="Authorization: Bearer $AUTH_TOKEN"
+# 
+# # Colors for output
+# GREEN="\033[0;32m"
+# RED="\033[0;31m"
+# YELLOW="\033[0;33m"
+# NC="\033[0m" # No Color
+# 
+# # Test counter
+# PASSED=0
+# FAILED=0
+# TOTAL=0
+# 
+# # Helper function to run tests
+# run_test() {
+#   local test_name=$1
+#   local command=$2
+#   local expected_status=$3
+#   local expected_content=$4
+#   
+#   echo -e "${YELLOW}Running test: $test_name${NC}"
+#   
+#   # Run the command and capture status code and response
+#   response=$(eval $command)
+#   status=$?
+#     
+#     # Check if the command executed successfully
+#     if [ $status -ne 0 ]; then
+#   echo -e "${RED}ERROR: Command failed to execute${NC}"
+#   FAILED=$((FAILED+1))
+#   TOTAL=$((TOTAL+1))
+#   return
+#   fi
+#   
+#   # Extract HTTP status code from response
+#   http_status=$(echo "$response" | head -n 1 | awk '{print $2}')
+#   
+#   # Extract response body
+#   body=$(echo "$response" | awk 'BEGIN{flag=0} /^\{/{flag=1} flag')
+#   
+#   # Test status code if expected_status is provided
+#   status_match=true
+#   if [ ! -z "$expected_status" ] && [ "$http_status" != "$expected_status" ]; then
+#   status_match=false
+#   fi
+#   
+#   # Test content if expected_content is provided
+#   content_match=true
+#   if [ ! -z "$expected_content" ] && ! echo "$body" | grep -q "$expected_content"; then
+#   content_match=false
+#   fi
+#   
+#   # Print results
+#   if [ "$status_match" = true ] && [ "$content_match" = true ]; then
+#   echo -e "${GREEN}✓ PASSED: $test_name${NC}"
+#   echo "  Status: $http_status"
+#   echo "  Response: $body"
+#   PASSED=$((PASSED+1))
+#   else
+#     echo -e "${RED}✗ FAILED: $test_name${NC}"
+#   echo "  Expected status: $expected_status, Got: $http_status"
+#   if [ "$content_match" = false ]; then
+#   echo "  Expected content to include: $expected_content"
+#   echo "  Got: $body"
+#   fi
+#   FAILED=$((FAILED+1))
+#   fi
+#   
+#   TOTAL=$((TOTAL+1))
+#   echo ""
+# }
+# 
+# # Store a flight ID for use in tests
+# FLIGHT_ID=""
+# 
+# # ================================================================
+# # Authentication Tests
+# # ================================================================
+# echo -e "${YELLOW}=== Testing Authentication ===${NC}"
+# 
+# # Test without authentication
+# run_test "Request without auth token should fail" \
+# "curl -s -w '%{http_code}' $API_URL/avg-dep-delay" \
+# "401" \
+# "Unauthorized"
+# 
+# # Test with invalid authentication
+# run_test "Request with invalid auth token should fail" \
+# "curl -s -w '%{http_code}' -H 'Authorization: Bearer invalid-token' $API_URL/avg-dep-delay" \
+# "401" \
+# "Unauthorized"
+# 
+# # ================================================================
+# # POST /flight - Create new flight
+# # ================================================================
+# echo -e "${YELLOW}=== Testing POST /flight endpoint ===${NC}"
+# 
+# # Test valid flight creation
+# run_test "Create valid flight" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -H 'Content-Type: application/json' -X POST -d '{\"carrier\":\"AA\",\"origin\":\"JFK\",\"dest\":\"LAX\",\"dep_time\":800,\"arr_time\":1100}' $API_URL/flight" \
+# "200" \
+# "success"
+# 
+# # Extract flight ID from response for later tests
+# FLIGHT_ID=$(echo "$response" | grep -o '"flight_id":"[^"]*"' | cut -d'"' -f4)
+# echo "Using flight ID: $FLIGHT_ID for subsequent tests"
+# 
+# # Test flight creation with missing required field
+# run_test "Create flight with missing field should fail" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -H 'Content-Type: application/json' -X POST -d '{\"carrier\":\"AA\",\"origin\":\"JFK\"}' $API_URL/flight" \
+# "400" \
+# "Missing required field"
+# 
+# # Test flight creation with invalid JSON
+# run_test "Create flight with invalid JSON should fail" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -H 'Content-Type: application/json' -X POST -d '{carrier:AA,origin:JFK}' $API_URL/flight" \
+# "400" \
+# "Invalid request body"
+# 
+# # ================================================================
+# # GET /flight/:id - Get flight details
+# # ================================================================
+# echo -e "${YELLOW}=== Testing GET /flight/:id endpoint ===${NC}"
+# 
+# # Test getting valid flight
+# run_test "Get valid flight" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/flight/$FLIGHT_ID" \
+# "200" \
+# "JFK"
+# 
+# # Test getting invalid flight
+# run_test "Get non-existent flight should return 404" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/flight/invalid-id" \
+# "404" \
+# "Flight not found"
+# 
+# # ================================================================
+# # GET /check-delay/:id - Check flight delay
+# # ================================================================
+# echo -e "${YELLOW}=== Testing GET /check-delay/:id endpoint ===${NC}"
+# 
+# # Test checking delay for valid flight
+# run_test "Check delay for valid flight" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/check-delay/$FLIGHT_ID" \
+# "200" \
+# "is_delayed"
+# 
+# # Test checking delay for invalid flight
+# run_test "Check delay for non-existent flight should return 404" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/check-delay/invalid-id" \
+# "404" \
+# "Flight not found"
+# 
+# # ================================================================
+# # GET /avg-dep-delay - Get average delay by airline
+# # ================================================================
+# echo -e "${YELLOW}=== Testing GET /avg-dep-delay endpoint ===${NC}"
+# 
+# # Test getting all airlines' delays
+# run_test "Get average delay for all airlines" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/avg-dep-delay" \
+# "200" \
+# "carrier"
+# 
+# # Test getting specific airline's delay
+# run_test "Get average delay for specific airline" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/avg-dep-delay?id=AA" \
+# "200" \
+# "carrier"
+# 
+# # ================================================================
+# # GET /top-destinations/:n - Get top destinations
+# # ================================================================
+# echo -e "${YELLOW}=== Testing GET /top-destinations/:n endpoint ===${NC}"
+# 
+# # Test getting top 5 destinations
+# run_test "Get top 5 destinations" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/top-destinations/5" \
+# "200" \
+# "flight_count"
+# 
+# # Test with invalid parameter
+# run_test "Get top destinations with invalid parameter should fail" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/top-destinations/invalid" \
+# "400" \
+# "Invalid number"
+# 
+# # ================================================================
+# # PUT /flights/:id - Update flight details
+# # ================================================================
+# echo -e "${YELLOW}=== Testing PUT /flights/:id endpoint ===${NC}"
+# 
+# # Test updating valid flight
+# run_test "Update valid flight" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -H 'Content-Type: application/json' -X PUT -d '{\"dest\":\"SFO\",\"arr_time\":1200}' $API_URL/flights/$FLIGHT_ID" \
+# "200" \
+# "success"
+# 
+# # Verify update worked
+# run_test "Verify flight update was applied" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/flight/$FLIGHT_ID" \
+# "200" \
+# "SFO"
+# 
+# # Test updating invalid flight
+# run_test "Update non-existent flight should return 404" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -H 'Content-Type: application/json' -X PUT -d '{\"dest\":\"SFO\"}' $API_URL/flights/invalid-id" \
+# "404" \
+# "Flight not found"
+# 
+# # ================================================================
+# # DELETE /:id - Delete flight
+# # ================================================================
+# echo -e "${YELLOW}=== Testing DELETE /:id endpoint ===${NC}"
+# 
+# # Create a flight to delete
+# delete_response=$(curl -s -H "$AUTH_HEADER" -H "Content-Type: application/json" -X POST -d '{"carrier":"DL","origin":"ATL","dest":"LGA","dep_time":1200,"arr_time":1400}' $API_URL/flight)
+# DELETE_FLIGHT_ID=$(echo "$delete_response" | grep -o '"flight_id":"[^"]*"' | cut -d'"' -f4)
+# 
+# # Test deleting valid flight
+# run_test "Delete valid flight" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -X DELETE $API_URL/$DELETE_FLIGHT_ID" \
+# "200" \
+# "success"
+# 
+# # Verify flight was deleted
+# run_test "Verify flight is deleted" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' $API_URL/flight/$DELETE_FLIGHT_ID" \
+# "404" \
+# "Flight not found"
+# 
+# # Test deleting invalid flight
+# run_test "Delete non-existent flight should return 404" \
+# "curl -s -w '%{http_code}' -H '$AUTH_HEADER' -X DELETE $API_URL/invalid-id" \
+# "404" \
+# "Flight not found"
+# 
+# # ================================================================
+# # Rate Limiting Tests
+# # ================================================================
+# echo -e "${YELLOW}=== Testing Rate Limiting ===${NC}"
+# 
+# # This test would hit the rate limit by sending many requests
+# # For demonstration, we'll just show the command
+# echo "To test rate limiting, run the following command in a loop:"
+# echo "for i in {1..101}; do curl -s -H '$AUTH_HEADER' $API_URL/avg-dep-delay; done"
+# echo "After 100 requests, you should see: Rate limit exceeded"
+# 
+# # ================================================================
+# # Test Summary
+# # ================================================================
+# echo -e "${YELLOW}=== Test Summary ===${NC}"
+# echo -e "${GREEN}Passed: $PASSED${NC}"
+# echo -e "${RED}Failed: $FAILED${NC}"
+# echo -e "Total: $TOTAL"
+# 
+# if [ $FAILED -eq 0 ]; then
+# echo -e "${GREEN}All tests passed!${NC}"
+# exit 0
+# else
+#   echo -e "${RED}Some tests failed!${NC}"
+# exit 1
+# fi

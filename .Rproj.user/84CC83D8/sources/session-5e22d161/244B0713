@@ -1,0 +1,26 @@
+{
+    "id": "244B0713",
+    "path": "D:/JOB_APP_DATA/jsonApiAmbiorixR/v2_test.sh",
+    "project_path": "v2_test.sh",
+    "type": "sh",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1740485027991.0,
+    "source_on_save": false,
+    "relative_order": 11,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "44,0",
+        "scrollLine": "17"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1740489533,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1740489533446,
+    "read_only": false,
+    "read_only_alternatives": []
+}

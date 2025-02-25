@@ -1,0 +1,30 @@
+curl -X PUT \
+-H "Content-Type: application/json" \
+-d '{
+      "dep_delay": 10,
+      "arr_delay": 5
+    }' \
+http://localhost:3000/flight/3
+
+
+req$body
+
+
+curl -X PUT http://localhost:3000/flight/3 -H "Content-Type: application/json" -d '{"dep_delay": 10, "arr_delay": 5}'
+
+
+
+curl -X POST http://localhost:3000/flight \
+-H "Content-Type: application/json" \
+-d '{
+      "year": 2024,
+      "month": 1,
+      "day": 15,
+      "dep_time": 1000,
+      "carrier": "AA",
+      "flight": 1234,
+      "origin": "JFK",
+      "dest": "LAX"
+    }'
+
+curl -s -H "http://localhost:3000/flight/13" | jq '.'
